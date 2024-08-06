@@ -36,13 +36,15 @@ async fn handler(event: Result<WebhookEvent, serde_json::Error>) {
     let repo = env::var("github_repo").unwrap_or("test".to_string());
     let trigger_phrase = env::var("trigger_phrase").unwrap_or("flows summarize".to_string());
     let llm_api_endpoint = env::var("llm_api_endpoint").unwrap_or("https://api.openai.com/v1".to_string());
-    let llm_model_name = env::var("llm_model_name").unwrap_or("gpt-4o".to_string());
+    let llm_model_name = env::var("llm_model_name").unwrap_or("gpt-4".to_string());
     let llm_ctx_size = env::var("llm_ctx_size").unwrap_or("16384".to_string()).parse::<u32>().unwrap_or(0);
     let llm_api_key = env::var("llm_api_key").unwrap_or("LLAMAEDGE".to_string());
 
-    //  The soft character limit of the input context size
-    //  This is measured in chars. We set it to be 2x llm_ctx_size, which is measured in tokens.
+    // The soft character limit of the input context size
+    // This is measured in chars. We set it to be 2x llm_ctx_size, which is measured in tokens.
     let ctx_size_char : usize = (2 * llm_ctx_size).try_into().unwrap_or(0);
+
+    let repo_description = env::var("repo_description").unwrap_or("This repository is used for demonstrating how to integrate AI summarization with GitHub PRs.".to_string());
 
     let payload = event.unwrap();
     let mut new_commit : bool = false;
@@ -156,7 +158,11 @@ async fn handler(event: Result<WebhookEvent, serde_json::Error>) {
     }
 
     let chat_id = format!("PR#{pull_number}");
-    let system = &format!("You are an experienced software developer. You will act as a reviewer for a GitHub Pull Request titled \"{}\". Please be as concise as possible while being accurate.", title);
+    let system = &format!(
+        "You are an experienced software developer. You will act as a reviewer for a GitHub Pull Request titled \"{}\". \
+        The repository is described as follows: {}. Please be as concise as possible while being accurate.",
+        title, repo_description
+    );
     let mut lf = LLMServiceFlows::new(&llm_api_endpoint);
     lf.set_api_key(&llm_api_key);
     // lf.set_retry_times(3);
