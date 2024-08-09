@@ -40,14 +40,11 @@ async fn handler(event: Result<WebhookEvent, serde_json::Error>) {
     let llm_ctx_size = env::var("llm_ctx_size").unwrap_or("16384".to_string()).parse::<u32>().unwrap_or(0);
     let llm_api_key = env::var("llm_api_key").unwrap_or("LLAMAEDGE".to_string());
 
-    // The soft character limit of the input context size
-    // This is measured in chars. We set it to be 2x llm_ctx_size, which is measured in tokens.
-    let ctx_size_char : usize = (2 * llm_ctx_size).try_into().unwrap_or(0);
-
-    let repo_description = env::var("repo_description").unwrap_or("This repository is used for demonstrating how to integrate AI summarization with GitHub PRs.".to_string());
+    // Soft character limit of the input context size (chars)
+    let ctx_size_char: usize = (2 * llm_ctx_size).try_into().unwrap_or(0);
 
     let payload = event.unwrap();
-    let mut new_commit : bool = false;
+    let mut new_commit: bool = false;
     let (title, pull_number, _contributor) = match payload.specific {
         WebhookEventPayload::PullRequest(e) => {
             if e.action == PullRequestWebhookEventAction::Opened {
@@ -61,7 +58,7 @@ async fn handler(event: Result<WebhookEvent, serde_json::Error>) {
             }
             let p = e.pull_request;
             (
-                p.title.unwrap_or("".to_string()),
+                p.title.unwrap_or("Untitled".to_string()),
                 p.number,
                 p.user.unwrap().login,
             )
@@ -75,10 +72,6 @@ async fn handler(event: Result<WebhookEvent, serde_json::Error>) {
 
             let body = e.comment.body.unwrap_or_default();
 
-            // if e.comment.performed_via_github_app.is_some() {
-            //     return;
-            // }
-            // TODO: Makeshift but operational
             if body.starts_with("Hello, I am a [PR summary agent]") {
                 log::info!("Ignore comment via bot");
                 return;
@@ -98,7 +91,6 @@ async fn handler(event: Result<WebhookEvent, serde_json::Error>) {
     let issues = octo.issues(owner.clone(), repo.clone());
     let mut comment_id: CommentId = 0u64.into();
     if new_commit {
-        // Find the first "Hello, I am a [PR summary agent]" comment to update
         match issues.list_comments(pull_number).send().await {
             Ok(comments) => {
                 for c in comments.items {
@@ -114,7 +106,6 @@ async fn handler(event: Result<WebhookEvent, serde_json::Error>) {
             }
         }
     } else {
-        // PR OPEN or Trigger phrase: create a new comment
         match issues.create_comment(pull_number, "Hello, I am a [PR summary agent](https://github.com/flows-network/github-pr-summary/) on [flows.network](https://flows.network/).\n\nIt could take a few minutes for me to analyze this PR. Relax, grab a cup of coffee and check back later. Thanks!").await {
             Ok(comment) => {
                 comment_id = comment.id;
@@ -133,22 +124,17 @@ async fn handler(event: Result<WebhookEvent, serde_json::Error>) {
     let mut commits: Vec<String> = Vec::new();
     for line in patch_as_text.lines() {
         if line.starts_with("From ") {
-            // Detected a new commit
             if !current_commit.is_empty() {
-                // Store the previous commit
                 commits.push(current_commit.clone());
             }
-            // Start a new commit
             current_commit.clear();
         }
-        // Append the line to the current commit if the current commit is less than ctx_size_char
         if current_commit.len() < ctx_size_char {
             current_commit.push_str(line);
             current_commit.push('\n');
         }
     }
     if !current_commit.is_empty() {
-        // Store the last commit
         commits.push(current_commit.clone());
     }
 
@@ -158,18 +144,13 @@ async fn handler(event: Result<WebhookEvent, serde_json::Error>) {
     }
 
     let chat_id = format!("PR#{pull_number}");
-    let system = &format!(
-        "You are an experienced software developer. You will act as a reviewer for a GitHub Pull Request titled \"{}\". \
-        The repository is described as follows: {}. Please be as concise as possible while being accurate.",
-        title, repo_description
-    );
+    let system = &format!("You are an experienced software developer. You will act as a reviewer for a GitHub Pull Request titled \"{}\". Please be as concise as possible while being accurate.", title);
     let mut lf = LLMServiceFlows::new(&llm_api_endpoint);
     lf.set_api_key(&llm_api_key);
-    // lf.set_retry_times(3);
 
     let mut reviews: Vec<String> = Vec::new();
     let mut reviews_text = String::new();
-    for (_i, commit) in commits.iter().enumerate() {
+    for (i, commit) in commits.iter().enumerate() {
         let commit_hash = &commit[5..45];
         log::debug!("Sending patch to LLM: {}", commit_hash);
         let co = ChatOptions {
@@ -179,7 +160,7 @@ async fn handler(event: Result<WebhookEvent, serde_json::Error>) {
             system_prompt: Some(system),
             ..Default::default()
         };
-        let question = "The following is a GitHub patch. Please summarize the key changes in concise points. Start with the most important findings.\n\n".to_string() + truncate(commit, ctx_size_char);
+        let question = format!("The following is a GitHub patch. Please summarize the key changes in concise points. Start with the most important findings.\n\n{}", truncate(commit, ctx_size_char));
         match lf.chat_completion(&chat_id, &question, &co).await {
             Ok(r) => {
                 if reviews_text.len() < ctx_size_char {
@@ -188,14 +169,14 @@ async fn handler(event: Result<WebhookEvent, serde_json::Error>) {
                     reviews_text.push_str("\n");
                 }
                 let mut review = String::new();
-                review.push_str(&format!("### [Commit {commit_hash}](https://github.com/{owner}/{repo}/pull/{pull_number}/commits/{commit_hash})\n"));
+                review.push_str(&format!("### [Commit {}](https://github.com/{}/pull/{}/commits/{})\n", commit_hash, owner, pull_number, commit_hash));
                 review.push_str(&r.choice);
                 review.push_str("\n\n");
                 reviews.push(review);
-                log::debug!("Received LLM resp for patch: {}", commit_hash);
+                log::debug!("Received LLM response for patch: {}", commit_hash);
             }
             Err(e) => {
-                log::error!("LLM returned an error for commit {commit_hash}: {}", e);
+                log::error!("LLM returned an error for commit {}: {}", commit_hash, e);
             }
         }
     }
@@ -211,7 +192,7 @@ async fn handler(event: Result<WebhookEvent, serde_json::Error>) {
             system_prompt: Some(system),
             ..Default::default()
         };
-        let question = "Here is a set of summaries for source code patches in this PR. Each summary starts with a ------ line. Write an overall summary. Present the potential issues and errors first, following by the most important findings, in your summary.\n\n".to_string() + &reviews_text;
+        let question = format!("Here is a set of summaries for source code patches in this PR. Each summary starts with a ------ line. Write an overall summary. Present the potential issues and errors first, followed by the most important findings, in your summary.\n\n{}", reviews_text);
         match lf.chat_completion(&chat_id, &question, &co).await {
             Ok(r) => {
                 resp.push_str(&r.choice);
@@ -223,15 +204,13 @@ async fn handler(event: Result<WebhookEvent, serde_json::Error>) {
             }
         }
     }
-    for (_i, review) in reviews.iter().enumerate() {
+    for review in reviews.iter() {
         resp.push_str(review);
     }
 
-    // Send the entire response to GitHub PR
-    // issues.create_comment(pull_number, resp).await.unwrap();
     match issues.update_comment(comment_id, resp).await {
         Err(error) => {
-            log::error!("Error posting resp: {}", error);
+            log::error!("Error posting response: {}", error);
         }
         _ => {}
     }
@@ -239,7 +218,7 @@ async fn handler(event: Result<WebhookEvent, serde_json::Error>) {
 
 fn truncate(s: &str, max_chars: usize) -> &str {
     match s.char_indices().nth(max_chars) {
+        Some((i, _)) => &s[..i],
         None => s,
-        Some((idx, _)) => &s[..idx],
     }
 }
